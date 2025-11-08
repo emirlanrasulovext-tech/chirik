@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package products;
+
+option go_package = "github.com/chirik/products/proto";
+
+service ProductsService {
+  rpc ListProducts(ListProductsRequest) returns (ListProductsResponse);
+  rpc GetProduct(GetProductRequest) returns (Product);
+  rpc CreateProduct(CreateProductRequest) returns (Product);
+}
+
+message Product {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  double price = 4;
+  string category = 5;
+  int32 stock = 6;
+  string created_at = 7;
+}
+
+message ListProductsRequest {
+  int32 page = 1;
+  int32 page_size = 2;
+  string category = 3;
+  string search_query = 4;
+}
+
+message ListProductsResponse {
+  repeated Product products = 1;
+  int32 total = 2;
+  int32 page = 3;
+  int32 page_size = 4;
+}
+
+message GetProductRequest {
+  string id = 1;
+}
+
+message CreateProductRequest {
+  string name = 1;
+  string description = 2;
+  double price = 3;
+  string category = 4;
+  int32 stock = 5;
+}
+
