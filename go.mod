@@ -4,6 +4,7 @@ go 1.25
 
 require (
 	github.com/RediSearch/redisearch-go/v2 v2.1.1
+	github.com/brianvoe/gofakeit/v7 v7.1.2
 	github.com/prometheus/client_golang v1.23.0
 	github.com/redis/go-redis/v9 v9.3.0
 	go.opentelemetry.io/otel v1.38.0

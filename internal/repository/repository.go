@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/RediSearch/redisearch-go/v2/redisearch"
+	"github.com/brianvoe/gofakeit/v7"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
@@ -39,9 +40,10 @@ type RedisRepository struct {
 }
 
 const (
-	productsKeyPrefix = "product:"
-	defaultIndexName  = "products-index"
-	minSeedProducts   = 5
+	productsKeyPrefix  = "product:"
+	defaultIndexName   = "products-index"
+	targetSeedProducts = 100000
+	seedScanBatchSize  = 1000
 )
 
 var seedProducts = []*Product{
@@ -85,6 +87,18 @@ var seedProducts = []*Product{
 		Category:    "Sports",
 		Stock:       120,
 	},
+}
+
+var seedCategories = []string{
+	"Electronics",
+	"Home",
+	"Sports",
+	"Outdoors",
+	"Health",
+	"Beauty",
+	"Automotive",
+	"Toys",
+	"Books",
 }
 
 func NewRedisRepository(addr string, logger *zap.Logger) (*RedisRepository, error) {
@@ -148,15 +162,14 @@ func (r *RedisRepository) createIndex(ctx context.Context) error {
 }
 
 func (r *RedisRepository) seedData(ctx context.Context) error {
-	keys, err := r.client.Keys(ctx, productsKeyPrefix+"*").Result()
+	existing, err := r.collectExistingProductIDs(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to list product keys: %w", err)
+		return err
 	}
 
-	existing := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		id := strings.TrimPrefix(key, productsKeyPrefix)
-		existing[id] = struct{}{}
+	if len(existing) >= targetSeedProducts {
+		r.logger.Info("Product catalog already seeded", zap.Int("count", len(existing)))
+		return nil
 	}
 
 	for _, product := range seedProducts {
@@ -168,36 +181,120 @@ func (r *RedisRepository) seedData(ctx context.Context) error {
 			seed.CreatedAt = time.Now()
 		}
 		if err := r.CreateProduct(ctx, &seed); err != nil {
-			return fmt.Errorf("failed to seed product %s: %w", product.ID, err)
+			return fmt.Errorf("failed to seed base product %s: %w", product.ID, err)
 		}
 		existing[seed.ID] = struct{}{}
 	}
 
-	count := len(existing)
-	for count < minSeedProducts {
-		id := fmt.Sprintf("seed-auto-%d", count+1)
-		if _, ok := existing[id]; ok {
-			count++
-			continue
-		}
-		product := &Product{
-			ID:          id,
-			Name:        fmt.Sprintf("Sample Product %d", count+1),
-			Description: "Automatically generated sample product",
-			Price:       49.99 + float64(count),
-			Category:    "Sample",
-			Stock:       20 + int32(count),
-			CreatedAt:   time.Now(),
-		}
-		if err := r.CreateProduct(ctx, product); err != nil {
-			return fmt.Errorf("failed to auto-seed product %s: %w", product.ID, err)
-		}
-		existing[id] = struct{}{}
-		count++
+	if len(existing) >= targetSeedProducts {
+		r.logger.Info("Ensured product seed data present", zap.Int("count", len(existing)))
+		return nil
 	}
 
-	r.logger.Info("Ensured product seed data present", zap.Int("count", count))
+	gofakeit.Seed(time.Now().UnixNano())
+
+	for len(existing) < targetSeedProducts {
+		id := fmt.Sprintf("seed-%s", strings.ReplaceAll(gofakeit.UUID(), "-", ""))
+		if _, ok := existing[id]; ok {
+			continue
+		}
+
+		product := &Product{
+			ID:          id,
+			Name:        gofakeit.ProductName(),
+			Description: gofakeit.ProductDescription(),
+			Price:       gofakeit.Price(5.0, 5000.0),
+			Category:    gofakeit.RandomString(seedCategories),
+			Stock:       int32(gofakeit.Number(0, 1000)),
+			CreatedAt:   time.Now(),
+		}
+
+		if err := r.CreateProduct(ctx, product); err != nil {
+			return fmt.Errorf("failed to seed product %s: %w", product.ID, err)
+		}
+
+		existing[id] = struct{}{}
+
+		if len(existing)%10000 == 0 {
+			r.logger.Info("Seeding products", zap.Int("count", len(existing)))
+		}
+	}
+
+	r.logger.Info("Ensured product seed data present", zap.Int("count", len(existing)))
 	return nil
+}
+
+func (r *RedisRepository) collectExistingProductIDs(ctx context.Context) (map[string]struct{}, error) {
+	existing := make(map[string]struct{}, targetSeedProducts)
+	var cursor uint64
+	pattern := productsKeyPrefix + "*"
+
+	for {
+		keys, nextCursor, err := r.client.Scan(ctx, cursor, pattern, int64(seedScanBatchSize)).Result()
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan product keys: %w", err)
+		}
+
+		for _, key := range keys {
+			id := strings.TrimPrefix(key, productsKeyPrefix)
+			existing[id] = struct{}{}
+		}
+
+		cursor = nextCursor
+		if cursor == 0 {
+			break
+		}
+	}
+
+	return existing, nil
+}
+
+func (r *RedisRepository) countProducts(ctx context.Context, shortCircuitAt int) (int, error) {
+	var cursor uint64
+	total := 0
+	pattern := productsKeyPrefix + "*"
+
+	for {
+		keys, nextCursor, err := r.client.Scan(ctx, cursor, pattern, int64(seedScanBatchSize)).Result()
+		if err != nil {
+			return 0, fmt.Errorf("failed to scan product keys: %w", err)
+		}
+
+		total += len(keys)
+		if shortCircuitAt > 0 && total >= shortCircuitAt {
+			return total, nil
+		}
+
+		cursor = nextCursor
+		if cursor == 0 {
+			break
+		}
+	}
+
+	return total, nil
+}
+
+func (r *RedisRepository) sampleProductID(ctx context.Context) (string, error) {
+	var cursor uint64
+	pattern := productsKeyPrefix + "*"
+
+	for {
+		keys, nextCursor, err := r.client.Scan(ctx, cursor, pattern, int64(seedScanBatchSize)).Result()
+		if err != nil {
+			return "", fmt.Errorf("failed to scan for sample product: %w", err)
+		}
+
+		if len(keys) > 0 {
+			return strings.TrimPrefix(keys[0], productsKeyPrefix), nil
+		}
+
+		cursor = nextCursor
+		if cursor == 0 {
+			break
+		}
+	}
+
+	return "", nil
 }
 
 func (r *RedisRepository) CreateProduct(ctx context.Context, product *Product) error {
@@ -366,19 +463,27 @@ func (r *RedisRepository) detectRediSearch(ctx context.Context) error {
 }
 
 func (r *RedisRepository) verifySeedData(ctx context.Context) error {
-	products, total, err := r.ListProducts(ctx, 1, int32(minSeedProducts), "", "")
+	total, err := r.countProducts(ctx, targetSeedProducts)
 	if err != nil {
-		return fmt.Errorf("failed to verify products listing: %w", err)
+		return err
 	}
 
-	if total < int32(minSeedProducts) {
-		return fmt.Errorf("insufficient seed data: have %d products, expected at least %d", total, minSeedProducts)
+	if total < targetSeedProducts {
+		return fmt.Errorf("insufficient seed data: have %d products, expected at least %d", total, targetSeedProducts)
 	}
 
-	if len(products) == 0 {
-		return fmt.Errorf("products list empty after seeding")
+	sampleID, err := r.sampleProductID(ctx)
+	if err != nil {
+		return err
+	}
+	if sampleID == "" {
+		return fmt.Errorf("no products found after seeding")
 	}
 
-	r.logger.Info("Verified product catalog", zap.Int32("count", total))
+	if _, err := r.GetProduct(ctx, sampleID); err != nil {
+		return fmt.Errorf("failed to retrieve sample product %s: %w", sampleID, err)
+	}
+
+	r.logger.Info("Verified product catalog", zap.Int("count", total))
 	return nil
 }
